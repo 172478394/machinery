@@ -251,14 +251,14 @@ func (worker *Worker) taskSucceeded(signature *tasks.Signature, taskResults []*t
 	}
 
 	// Log human readable results of the processed task
-	var debugResults = "[]"
-	results, err := tasks.ReflectTaskResults(taskResults)
-	if err != nil {
-		log.WARNING.Print(err)
-	} else {
-		debugResults = tasks.HumanReadableResults(results)
-	}
-	log.DEBUG.Printf("Processed task %s. Results = %s", signature.UUID, debugResults)
+	//var debugResults = "[]"
+	//results, err := tasks.ReflectTaskResults(taskResults)
+	//if err != nil {
+	//	log.WARNING.Print(err)
+	//} else {
+	//	debugResults = tasks.HumanReadableResults(results)
+	//}
+	//log.DEBUG.Printf("Processed task %s. Results = %s", signature.UUID, debugResults)
 
 	// Trigger success callbacks
 

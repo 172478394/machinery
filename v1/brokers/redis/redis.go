@@ -24,6 +24,28 @@ import (
 
 const defaultRedisDelayedTasksKey = "delayed_tasks"
 
+const (
+	luaPumpQueueScript = `
+local zset_key = KEYS[1]
+local default_queue = KEYS[2]
+local now = ARGV[1]
+local limit = ARGV[2]
+
+local expiredMembers = redis.call("ZRANGEBYSCORE", zset_key, 0, now, "LIMIT", 0, limit)
+
+if #expiredMembers == 0 then
+	return 0
+end
+
+for _,v in ipairs(expiredMembers) do
+	-- move to ready queue
+	redis.call("RPUSH", default_queue, v)
+end
+redis.call("ZREM", zset_key, unpack(expiredMembers))
+return #expiredMembers
+`
+)
+
 // Broker represents a Redis broker
 type Broker struct {
 	common.Broker
@@ -143,21 +165,23 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 			case <-b.GetStopChan():
 				return
 			default:
-				task, err := b.nextDelayedTask(b.redisDelayedTasksKey)
+				_, err := b.nextDelayedTask(b.redisDelayedTasksKey)
 				if err != nil {
 					continue
 				}
 
-				signature := new(tasks.Signature)
-				decoder := json.NewDecoder(bytes.NewReader(task))
-				decoder.UseNumber()
-				if err := decoder.Decode(signature); err != nil {
-					log.ERROR.Print(errs.NewErrCouldNotUnmarshalTaskSignature(task, err))
-				}
-
-				if err := b.Publish(context.Background(), signature); err != nil {
-					log.ERROR.Print(err)
-				}
+				//for _, task := range taskArray {
+				//	signature := new(tasks.Signature)
+				//	decoder := json.NewDecoder(bytes.NewReader(task))
+				//	decoder.UseNumber()
+				//	if err := decoder.Decode(signature); err != nil {
+				//		log.ERROR.Print(errs.NewErrCouldNotUnmarshalTaskSignature(task, err))
+				//	}
+				//
+				//	if err := b.Publish(context.Background(), signature); err != nil {
+				//		log.ERROR.Print(err)
+				//	}
+				//}
 			}
 		}
 	}()
@@ -344,7 +368,7 @@ func (b *Broker) consumeOne(delivery []byte, taskProcessor iface.TaskProcessor) 
 		return nil
 	}
 
-	log.DEBUG.Printf("Received new message: %s", delivery)
+	//log.DEBUG.Printf("Received new message: %s", delivery)
 
 	return taskProcessor.Process(signature)
 }
@@ -388,25 +412,25 @@ func (b *Broker) nextTask(queue string) (result []byte, err error) {
 
 // nextDelayedTask pops a value from the ZSET key using WATCH/MULTI/EXEC commands.
 // https://github.com/gomodule/redigo/blob/master/redis/zpop_example_test.go
-func (b *Broker) nextDelayedTask(key string) (result []byte, err error) {
+func (b *Broker) nextDelayedTask(key string) (result [][]byte, err error) {
 	conn := b.open()
 	defer conn.Close()
 
-	defer func() {
-		// Return connection to normal state on error.
-		// https://redis.io/commands/discard
-		// https://redis.io/commands/unwatch
-		if err == redis.ErrNil {
-			conn.Do("UNWATCH")
-		} else if err != nil {
-			conn.Do("DISCARD")
-		}
-	}()
+	//defer func() {
+	//	// Return connection to normal state on error.
+	//	// https://redis.io/commands/discard
+	//	// https://redis.io/commands/unwatch
+	//	if err == redis.ErrNil {
+	//		conn.Do("UNWATCH")
+	//	} else if err != nil {
+	//		conn.Do("DISCARD")
+	//	}
+	//}()
 
-	var (
-		items [][]byte
-		reply interface{}
-	)
+	//var (
+	//	items [][]byte
+	//	reply interface{}
+	//)
 
 	pollPeriod := 500 // default poll period for delayed tasks
 	if b.GetConfig().Redis != nil {
@@ -422,43 +446,64 @@ func (b *Broker) nextDelayedTask(key string) (result []byte, err error) {
 		// Space out queries to ZSET so we don't bombard redis
 		// server with relentless ZRANGEBYSCOREs
 		time.Sleep(time.Duration(pollPeriod) * time.Millisecond)
-		if _, err = conn.Do("WATCH", key); err != nil {
-			return
-		}
+		//if _, err = conn.Do("WATCH", key); err != nil {
+		//	return
+		//}
 
 		now := time.Now().UTC().UnixNano()
 
-		// https://redis.io/commands/zrangebyscore
-		items, err = redis.ByteSlices(conn.Do(
-			"ZRANGEBYSCORE",
-			key,
-			0,
-			now,
-			"LIMIT",
-			0,
-			1,
-		))
-		if err != nil {
+		limit := 100
+		script := redis.NewScript(2, luaPumpQueueScript)
+		val, scriptErr := script.Do(conn, key, b.GetConfig().DefaultQueue, now, limit)
+		if scriptErr != nil {
+			err = scriptErr
 			return
 		}
-		if len(items) != 1 {
-			err = redis.ErrNil
-			return
+		if val.(int64) == int64(limit) {
+			continue
 		}
 
-		_ = conn.Send("MULTI")
-		_ = conn.Send("ZREM", key, items[0])
-		reply, err = conn.Do("EXEC")
-		if err != nil {
-			return
-		}
+		break
 
-		if reply != nil {
-			result = items[0]
-			break
-		}
+		//// https://redis.io/commands/zrangebyscore
+		//items, err = redis.ByteSlices(conn.Do(
+		//	"ZRANGEBYSCORE",
+		//	key,
+		//	0,
+		//	now,
+		//	"LIMIT",
+		//	0,
+		//	100,
+		//))
+		//if err != nil {
+		//	return
+		//}
+		//if len(items) == 0 {
+		//	err = redis.ErrNil
+		//	time.Sleep(500 * time.Millisecond)
+		//	return
+		//}
+		//
+		////_ = conn.Send("MULTI")
+		////_ = conn.Send("ZREM", key, items[0])
+		////reply, err = conn.Do("EXEC")
+		//var args []interface{}
+		//args = append(args, key)
+		//for _, item := range items {
+		//	args = append(args, item)
+		//}
+		//reply, err = conn.Do("ZREM", args...)
+		//if err != nil {
+		//	return
+		//}
+		//
+		//if reply != nil {
+		//	result = items
+		//	break
+		//}
 	}
 
+	time.Sleep(100 * time.Millisecond)
 	return
 }
 
