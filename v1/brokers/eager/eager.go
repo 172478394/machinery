@@ -38,6 +38,10 @@ func (eagerBroker *Broker) StopConsuming() {
 	// do nothing
 }
 
+func (eagerBroker *Broker) UnPublish(ctx context.Context, jobId, queue string) error {
+	panic("implement me")
+}
+
 // Publish places a new message on the default queue
 func (eagerBroker *Broker) Publish(ctx context.Context, task *tasks.Signature) error {
 	if eagerBroker.worker == nil {

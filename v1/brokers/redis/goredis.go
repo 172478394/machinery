@@ -178,6 +178,10 @@ func (b *BrokerGR) StopConsuming() {
 	b.rclient.Close()
 }
 
+func (b *BrokerGR) UnPublish(ctx context.Context, jobId, queue string) error {
+	panic("implement me")
+}
+
 // Publish places a new message on the default queue
 func (b *BrokerGR) Publish(ctx context.Context, signature *tasks.Signature) error {
 	// Adjust routing key (this decides which queue the message will be published to)

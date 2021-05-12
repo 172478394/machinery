@@ -3,6 +3,7 @@ package redis
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -39,10 +40,44 @@ end
 
 for _,v in ipairs(expiredMembers) do
 	-- move to ready queue
-	redis.call("RPUSH", default_queue, v)
+	local routingKey, job_id = struct.unpack("Hc0Hc0", v)
+	local job_key = table.concat({"job", job_id}, "_")
+	local job = redis.call("GET", job_key)
+	if job then
+		redis.call("RPUSH", routingKey, job)
+		redis.call("del", job_key)
+	end
 end
 redis.call("ZREM", zset_key, unpack(expiredMembers))
 return #expiredMembers
+`
+	luaAddQueueScript = `
+local zset_key = KEYS[1]
+local score = ARGV[1]
+local member = ARGV[2]
+local job_id = ARGV[3]
+local job = ARGV[4]
+
+local zset_ret = redis.call("ZADD", zset_key, score, member)
+if zset_ret == 0 then
+	return ""
+end
+
+local set_ret = redis.call("SET", table.concat({"job", job_id}, "_"), job)
+return set_ret
+`
+	luaRemoveQueueScript= `
+local zset_key = KEYS[1]
+local member = ARGV[1]
+local job_id = ARGV[2]
+
+local zset_ret = redis.call("ZREM", zset_key, member)
+if zset_ret == 0 then
+	return zset_ret
+end
+
+local del_ret = redis.call("DEL", table.concat({"job", job_id}, "_"))
+return del_ret
 `
 )
 
@@ -211,6 +246,37 @@ func (b *Broker) StopConsuming() {
 	}
 }
 
+func (b *Broker) UnPublish(ctx context.Context, jobId, queue string) error {
+	conn := b.open()
+	defer conn.Close()
+
+	if queue == "" {
+		queue = b.GetConfig().DefaultQueue
+	}
+
+	// struct-pack the data in the format `Hc0Hc0`:
+	//   {taskId len}{taskId}{task len}{task}
+	// length are 2-byte uint16 in little-endian
+	taskIdLen := len(jobId)
+	routingKeyLen := len(queue)
+	msgBytes := make([]byte, 0)
+	buffer := bytes.NewBuffer(msgBytes)
+	_ = binary.Write(buffer, binary.LittleEndian, uint16(routingKeyLen))
+	_ = binary.Write(buffer, binary.LittleEndian, []byte(queue))
+	_ = binary.Write(buffer, binary.LittleEndian, uint16(taskIdLen))
+	_ = binary.Write(buffer, binary.LittleEndian, []byte(jobId))
+	script := redis.NewScript(1, luaRemoveQueueScript)
+	val, scriptErr := script.Do(conn, b.redisDelayedTasksKey, buffer, jobId)
+	if scriptErr != nil {
+		return scriptErr
+	}
+	if val.(int64) == 0 {
+		return fmt.Errorf("remove task failed")
+	}
+
+	return nil
+}
+
 // Publish places a new message on the default queue
 func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error {
 	// Adjust routing key (this decides which queue the message will be published to)
@@ -231,8 +297,29 @@ func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error 
 
 		if signature.ETA.After(now) {
 			score := signature.ETA.UnixNano()
-			_, err = conn.Do("ZADD", b.redisDelayedTasksKey, score, msg)
-			return err
+
+			// struct-pack the data in the format `Hc0Hc0`:
+			//   {taskId len}{taskId}{task len}{task}
+			// length are 2-byte uint16 in little-endian
+			taskIdLen := len(signature.UUID)
+			routingKeyLen := len(signature.RoutingKey)
+			msgBytes := make([]byte, 0)
+			buffer := bytes.NewBuffer(msgBytes)
+			_ = binary.Write(buffer, binary.LittleEndian, uint16(routingKeyLen))
+			_ = binary.Write(buffer, binary.LittleEndian, []byte(signature.RoutingKey))
+			_ = binary.Write(buffer, binary.LittleEndian, uint16(taskIdLen))
+			_ = binary.Write(buffer, binary.LittleEndian, []byte(signature.UUID))
+			script := redis.NewScript(1, luaAddQueueScript)
+			val, scriptErr := script.Do(conn, b.redisDelayedTasksKey, score, buffer, signature.UUID, msg)
+			if scriptErr != nil {
+				return scriptErr
+			}
+			if val.(string) != "OK" {
+				return fmt.Errorf("eval luaAddQueueScript result 0")
+			}
+			//_, err = conn.Do("ZADD", b.redisDelayedTasksKey, score, buffer)
+			//return err
+			return nil
 		}
 	}
 

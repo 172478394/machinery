@@ -125,6 +125,10 @@ func (b *Broker) StopConsuming() {
 	<-b.stopDone
 }
 
+func (b *Broker) UnPublish(ctx context.Context, jobId, queue string) error {
+	panic("implement me")
+}
+
 // Publish places a new message on the default queue or the queue pointed to
 // by the routing key
 func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error {

@@ -217,6 +217,10 @@ func (server *Server) SendTask(signature *tasks.Signature) (*result.AsyncResult,
 	return server.SendTaskWithContext(context.Background(), signature)
 }
 
+func (server *Server) RemoveTask(taskId, queue string) error {
+	return server.broker.UnPublish(context.Background(), taskId, queue)
+}
+
 // SendChainWithContext will inject the trace context in all the signature headers before publishing it
 func (server *Server) SendChainWithContext(ctx context.Context, chain *tasks.Chain) (*result.ChainAsyncResult, error) {
 	span, _ := opentracing.StartSpanFromContext(ctx, "SendChain", tracing.ProducerOption(), tracing.MachineryTag, tracing.WorkflowChainTag)
