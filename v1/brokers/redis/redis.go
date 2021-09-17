@@ -66,7 +66,7 @@ end
 local set_ret = redis.call("SET", table.concat({"job", job_id}, "_"), job)
 return set_ret
 `
-	luaRemoveQueueScript= `
+	luaRemoveQueueScript = `
 local zset_key = KEYS[1]
 local member = ARGV[1]
 local job_id = ARGV[2]
@@ -314,7 +314,7 @@ func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error 
 			if scriptErr != nil {
 				return scriptErr
 			}
-			if val.(string) != "OK" {
+			if v, ok := val.(string); !ok || v != "OK" {
 				return fmt.Errorf("eval luaAddQueueScript result 0")
 			}
 			//_, err = conn.Do("ZADD", b.redisDelayedTasksKey, score, buffer)
