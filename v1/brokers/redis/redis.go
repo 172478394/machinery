@@ -79,7 +79,36 @@ end
 local del_ret = redis.call("DEL", table.concat({"job", job_id}, "_"))
 return del_ret
 `
+	luaBatchRemoveQueueScript = `
+local zset_key = KEYS[1]
+local members = {}
+local job_ids = {}
+for i,arg in ipairs(ARGV) do
+	if i % 2 == 0 then
+		table.insert(job_ids, arg)
+	else 
+		table.insert(members, arg)
+	end
+end
+
+local zset_ret = redis.call("ZREM", zset_key, unpack(members))
+if zset_ret == 0 then
+	return zset_ret
+end
+
+local del_keys = {}
+for _,jobId in ipairs(job_ids) do
+	table.insert(del_keys, table.concat({"job", jobId}, "_"))
+end
+local del_ret = redis.call("DEL", unpack(del_keys))
+return del_ret
+`
 )
+
+var redisRemoveQueueScript = redis.NewScript(1, luaRemoveQueueScript)
+var redisBatchRemoveQueueScript = redis.NewScript(1, luaBatchRemoveQueueScript)
+var redisAddQueueScript = redis.NewScript(1, luaAddQueueScript)
+var redisPumpQueueScript = redis.NewScript(2, luaPumpQueueScript)
 
 // Broker represents a Redis broker
 type Broker struct {
@@ -144,6 +173,11 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 		}
 		return b.GetRetry(), errs.ErrConsumerStopped
 	}
+
+	_ = redisPumpQueueScript.Load(conn)
+	_ = redisAddQueueScript.Load(conn)
+	_ = redisRemoveQueueScript.Load(conn)
+	_ = redisBatchRemoveQueueScript.Load(conn)
 
 	// Channel to which we will push tasks ready for processing by worker
 	deliveries := make(chan []byte, concurrency)
@@ -265,13 +299,55 @@ func (b *Broker) UnPublish(ctx context.Context, jobId, queue string) error {
 	_ = binary.Write(buffer, binary.LittleEndian, []byte(queue))
 	_ = binary.Write(buffer, binary.LittleEndian, uint16(taskIdLen))
 	_ = binary.Write(buffer, binary.LittleEndian, []byte(jobId))
-	script := redis.NewScript(1, luaRemoveQueueScript)
-	val, scriptErr := script.Do(conn, b.redisDelayedTasksKey, buffer, jobId)
+	//script := redis.NewScript(1, luaRemoveQueueScript)
+	val, scriptErr := redisRemoveQueueScript.Do(conn, b.redisDelayedTasksKey, buffer, jobId)
 	if scriptErr != nil {
 		return scriptErr
 	}
 	if val.(int64) == 0 {
 		return fmt.Errorf("remove task failed")
+	}
+
+	return nil
+}
+
+func (b *Broker) BatchUnPublish(ctx context.Context, jobIds, queues []string) error {
+	conn := b.open()
+	defer conn.Close()
+
+	jobsNum := int64(len(jobIds))
+	//buffers := make([]*bytes.Buffer, 0, jobsNum)
+	keysAndArgs := make([]interface{}, 0, 1+2*jobsNum)
+	keysAndArgs = append(keysAndArgs, b.redisDelayedTasksKey)
+	for i, jobId := range jobIds {
+		if queues[i] == "" {
+			queues[i] = b.GetConfig().DefaultQueue
+		}
+
+		// struct-pack the data in the format `Hc0Hc0`:
+		//   {taskId len}{taskId}{task len}{task}
+		// length are 2-byte uint16 in little-endian
+		taskIdLen := len(jobId)
+		routingKeyLen := len(queues[i])
+		msgBytes := make([]byte, 0)
+		buffer := bytes.NewBuffer(msgBytes)
+		_ = binary.Write(buffer, binary.LittleEndian, uint16(routingKeyLen))
+		_ = binary.Write(buffer, binary.LittleEndian, []byte(queues[i]))
+		_ = binary.Write(buffer, binary.LittleEndian, uint16(taskIdLen))
+		_ = binary.Write(buffer, binary.LittleEndian, []byte(jobId))
+
+		//buffers = append(buffers, buffer)
+		keysAndArgs = append(keysAndArgs, buffer)
+		keysAndArgs = append(keysAndArgs, jobId)
+	}
+
+	//script := redis.NewScript(1, luaBatchRemoveQueueScript)
+	val, scriptErr := redisBatchRemoveQueueScript.Do(conn, keysAndArgs...)
+	if scriptErr != nil {
+		return scriptErr
+	}
+	if val.(int64) < jobsNum {
+		return fmt.Errorf("remove task failed, total: %d, success: %d", jobsNum, val.(int64))
 	}
 
 	return nil
@@ -309,8 +385,8 @@ func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error 
 			_ = binary.Write(buffer, binary.LittleEndian, []byte(signature.RoutingKey))
 			_ = binary.Write(buffer, binary.LittleEndian, uint16(taskIdLen))
 			_ = binary.Write(buffer, binary.LittleEndian, []byte(signature.UUID))
-			script := redis.NewScript(1, luaAddQueueScript)
-			val, scriptErr := script.Do(conn, b.redisDelayedTasksKey, score, buffer, signature.UUID, msg)
+			//script := redis.NewScript(1, luaAddQueueScript)
+			val, scriptErr := redisAddQueueScript.Do(conn, b.redisDelayedTasksKey, score, buffer, signature.UUID, msg)
 			if scriptErr != nil {
 				return scriptErr
 			}
@@ -540,8 +616,8 @@ func (b *Broker) nextDelayedTask(key string) (result [][]byte, err error) {
 		now := time.Now().UTC().UnixNano()
 
 		limit := 100
-		script := redis.NewScript(2, luaPumpQueueScript)
-		val, scriptErr := script.Do(conn, key, b.GetConfig().DefaultQueue, now, limit)
+		//script := redis.NewScript(2, luaPumpQueueScript)
+		val, scriptErr := redisPumpQueueScript.Do(conn, key, b.GetConfig().DefaultQueue, now, limit)
 		if scriptErr != nil {
 			err = scriptErr
 			return

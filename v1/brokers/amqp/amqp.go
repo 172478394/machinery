@@ -185,6 +185,10 @@ func (b *Broker) UnPublish(ctx context.Context, jobId, queue string) error {
 	panic("implement me")
 }
 
+func (b *Broker) BatchUnPublish(ctx context.Context, jobIds, queues []string) error {
+	panic("implement me")
+}
+
 // Publish places a new message on the default queue
 func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error {
 	// Adjust routing key (this decides which queue the message will be published to)

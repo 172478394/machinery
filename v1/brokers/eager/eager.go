@@ -42,6 +42,10 @@ func (eagerBroker *Broker) UnPublish(ctx context.Context, jobId, queue string) e
 	panic("implement me")
 }
 
+func (eagerBroker *Broker) BatchUnPublish(ctx context.Context, jobIds, queues []string) error {
+	panic("implement me")
+}
+
 // Publish places a new message on the default queue
 func (eagerBroker *Broker) Publish(ctx context.Context, task *tasks.Signature) error {
 	if eagerBroker.worker == nil {
